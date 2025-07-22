@@ -1,96 +1,110 @@
+import streamlit as st
 import pandas as pd
 import itertools
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
 
-# Configurable semester dates
-start_date = datetime(2025, 8, 18)
-end_date = datetime(2025, 12, 19)
-WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+st.title("After-School Class Scheduler")
 
-# Load class and teacher data
-classes = pd.read_csv('data/classes.csv')
-teachers = pd.read_csv('data/teachers.csv')
-with open('data/lessons.txt', 'r') as f:
-    lessons = [line.strip() for line in f if line.strip()]
+st.markdown("Upload your input files:")
 
-# Parse and clean inputs
-teachers['AvailableDays'] = teachers['AvailableDays'].str.split(',')
-classes['MeetingDays'] = classes['MeetingDays'].str.split(',')
+classes_file = st.file_uploader("Upload `classes.csv`", type="csv")
+teachers_file = st.file_uploader("Upload `teachers.csv`", type="csv")
+lessons_file = st.file_uploader("Upload `lessons.txt`", type="txt")
 
-# Create list of all dates in the semester
-semester_dates = pd.date_range(start=start_date, end=end_date, freq='D')
-weekday_map = {day: i for i, day in enumerate(WEEKDAYS)}
+start_date = st.date_input("Semester Start Date", datetime(2025, 8, 18))
+end_date = st.date_input("Semester End Date", datetime(2025, 12, 19))
 
-# Generate class sessions with actual dates
-class_sessions = []
-for _, cls in classes.iterrows():
-    for date in semester_dates:
-        if date.strftime('%A') in cls['MeetingDays']:
-            class_sessions.append({
-                'Date': date,
-                'ClassName': cls['ClassName'],
-                'Time': cls['Time'],
-                'Location': cls['Location'],
-                'Week': date.isocalendar().week
+if st.button("Generate Schedule"):
+    if not (classes_file and teachers_file and lessons_file):
+        st.warning("Please upload all files.")
+    else:
+        classes = pd.read_csv(classes_file)
+        teachers = pd.read_csv(teachers_file)
+        lessons = [line.decode("utf-8").strip() for line in
+                   lessons_file.readlines() if line.strip()]
+
+        teachers['AvailableDays'] = teachers['AvailableDays'].apply(
+            lambda x: [d.strip() for d in x.split(',')])
+        classes['MeetingDays'] = classes['MeetingDays'].apply(
+            lambda x: [d.strip() for d in x.split(',')])
+
+        semester_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        class_sessions = []
+
+        for _, cls in classes.iterrows():
+            for date in semester_dates:
+                if date.strftime('%A') in cls['MeetingDays']:
+                    class_sessions.append({
+                        'Date': date,
+                        'Week': date.isocalendar().week,
+                        'Weekday': date.strftime('%A'),
+                        'ClassName': cls['ClassName'],
+                        'Time': cls['Time'],
+                        'Location': cls['Location']
+                    })
+
+        assigned_teachers = defaultdict(
+            lambda: defaultdict(lambda: {'days': set(), 'count': 0}))
+        teacher_lessons_by_week = defaultdict(dict)
+        lesson_pool = itertools.cycle(lessons)
+        schedule = []
+
+        for session in class_sessions:
+            day = session['Weekday']
+            week = session['Week']
+
+
+            def get_available(rank):
+                return [
+                    t for _, t in teachers[teachers['Rank'] == rank].iterrows()
+                    if day in t['AvailableDays'] and
+                       assigned_teachers[t['Name']][week]['count'] < t[
+                           'MaxClassesPerWeek'] and
+                       day not in assigned_teachers[t['Name']][week]['days']
+                ]
+
+
+            leads = get_available('Lead')
+            assists = get_available('Assistant')
+
+            if not leads or not assists:
+                continue
+
+            lead = random.choice(leads)
+            assist = random.choice(
+                [a for a in assists if a['Name'] != lead['Name']])
+
+            for t in (lead, assist):
+                if week not in teacher_lessons_by_week[t['Name']]:
+                    teacher_lessons_by_week[t['Name']][week] = next(lesson_pool)
+
+            lesson = teacher_lessons_by_week[lead['Name']][week]
+
+            schedule.append({
+                'Date': session['Date'].strftime('%Y-%m-%d'),
+                'Weekday': session['Weekday'],
+                'ClassName': session['ClassName'],
+                'Time': session['Time'],
+                'Location': session['Location'],
+                'LeadTeacher': lead['Name'],
+                'AssistantTeacher': assist['Name'],
+                'Lesson': lesson
             })
 
-# Shuffle lessons and prepare state
-lesson_pool = itertools.cycle(lessons)
-assigned_teachers = defaultdict(lambda: defaultdict(lambda: {'days': set(), 'count': 0}))
-teacher_lessons_by_week = defaultdict(dict)
-schedule = []
+            for t in (lead, assist):
+                assigned_teachers[t['Name']][week]['count'] += 1
+                assigned_teachers[t['Name']][week]['days'].add(day)
 
-# Assign teachers and lessons
-for session in class_sessions:
-    day_name = session['Date'].strftime('%A')
-    week = session['Week']
+        df_schedule = pd.DataFrame(schedule)
 
-    def get_available(rank):
-        return [
-            t for _, t in teachers[teachers['Rank'] == rank].iterrows()
-            if day_name in t['AvailableDays'] and
-               assigned_teachers[t['Name']][week]['count'] < t['MaxClassesPerWeek'] and
-               day_name not in assigned_teachers[t['Name']][week]['days']
-        ]
-
-    lead_options = get_available('Lead')
-    assist_options = get_available('Assistant')
-
-    if not lead_options or not assist_options:
-        print(f"⚠️ Skipping {session['ClassName']} on {session['Date'].strftime('%Y-%m-%d')}: no teacher pair")
-        continue
-
-    lead = random.choice(lead_options)
-    assistant = random.choice([a for a in assist_options if a['Name'] != lead['Name']])
-
-    # Assign lesson for that week if not already chosen
-    for t in (lead, assistant):
-        if week not in teacher_lessons_by_week[t['Name']]:
-            teacher_lessons_by_week[t['Name']][week] = next(lesson_pool)
-
-    lesson = teacher_lessons_by_week[lead['Name']][week]  # Lead lesson determines class lesson
-
-    schedule.append({
-        'Date': session['Date'].strftime('%Y-%m-%d'),
-        'Weekday': day_name,
-        'ClassName': session['ClassName'],
-        'Time': session['Time'],
-        'Location': session['Location'],
-        'LeadTeacher': lead['Name'],
-        'AssistantTeacher': assistant['Name'],
-        'Lesson': lesson
-    })
-
-    # Update weekly state
-    for t in (lead, assistant):
-        assigned_teachers[t['Name']][week]['days'].add(day_name)
-        assigned_teachers[t['Name']][week]['count'] += 1
-
-# Save to Excel
-df_schedule = pd.DataFrame(schedule)
-df_schedule.sort_values(by=['Date', 'Time'], inplace=True)
-df_schedule.to_excel('output/semester_schedule.xlsx', index=False)
-
-print("✅ Semester schedule saved to 'semester_schedule.xlsx'")
+        if df_schedule.empty:
+            st.warning(
+                "⚠️ No schedule could be created. Please check constraints and input files.")
+        else:
+            st.success("✅ Schedule created!")
+            st.dataframe(df_schedule)
+            csv = df_schedule.to_csv(index=False).encode('utf-8')
+            st.download_button("Download Schedule as CSV", csv,
+                               "semester_schedule.csv", "text/csv")
